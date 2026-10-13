@@ -1,0 +1,126 @@
+# Публикация приложения «Трекер расходов».
+#
+# Как это работает:
+#   1) забирает рабочую версию из ЗАКРЫТОГО проекта pashar1k/podotchet (ключом только на чтение);
+#   2) шифрует её паролем (StatiCrypt) и проверяет, что наружу не уходит ни строчки исходного кода;
+#   3) выкладывает на сайт https://pashar1k.github.io/podotchet/
+# В этом открытом проекте исходного кода нет и никогда не появляется:
+# он существует только на временной машине GitHub, пока идёт публикация, и в журнал не выводится.
+#
+# Когда запускается:
+#   — вручную: Actions → «Публикация приложения» → Run workflow (публикует всегда);
+#   — сама каждые 30 минут: публикует, только если приложение в закрытом проекте изменилось.
+#
+# Сейф этого проекта (Settings → Secrets and variables → Actions):
+#   STATICRYPT_PASSWORD — пароль для входа в приложение;
+#   SOURCE_DEPLOY_KEY   — ключ только на чтение закрытого проекта pashar1k/podotchet.
+#
+# Все сторонние программы закреплены на точных проверенных версиях (по коммиту).
+name: Публикация приложения
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
+
+# Публикации идут строго по очереди, чтобы на сайте всегда оказывалась последняя версия
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Быстрая проверка: изменилось ли приложение с прошлой публикации
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.changes.outputs.publish }}
+    steps:
+      - name: Забрать рабочую версию из закрытого проекта
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: pashar1k/podotchet
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          path: source
+          persist-credentials: false
+
+      - name: Сравнить с опубликованной версией
+        id: changes
+        env:
+          STATICRYPT_PASSWORD: ${{ secrets.STATICRYPT_PASSWORD }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ -z "$STATICRYPT_PASSWORD" ]; then
+            echo "::error::Не задан пароль приложения (секрет STATICRYPT_PASSWORD)"
+            exit 1
+          fi
+          # «Отпечаток» версии: меняется при изменении приложения, окна пароля или пароля,
+          # но сам по себе ничего из этого не раскрывает
+          fingerprint=$( { printf '%s' "$STATICRYPT_PASSWORD"; cat source/index.html source/deploy/password_template.html source/deploy/staticrypt.json source/deploy/package-lock.json; } | sha256sum | cut -d' ' -f1 )
+          live=$(curl -fsS "https://pashar1k.github.io/podotchet/version.txt?t=$(date +%s)" 2>/dev/null || true)
+          if [ "$EVENT" = "schedule" ] && [ "$fingerprint" = "$live" ]; then
+            echo "Приложение не менялось — публиковать нечего."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Нужна публикация."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Шифрование и выкладка (только если есть что публиковать)
+  publish:
+    needs: check
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: https://pashar1k.github.io/podotchet/
+    steps:
+      - name: Забрать рабочую версию из закрытого проекта
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: pashar1k/podotchet
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          path: source
+          persist-credentials: false
+
+      - name: Подготовить Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Установить программу шифрования
+        run: npm ci --prefix source/deploy --no-audit --no-fund
+
+      - name: Зашифровать приложение паролем
+        env:
+          STATICRYPT_PASSWORD: ${{ secrets.STATICRYPT_PASSWORD }}
+        run: npm run build --prefix source/deploy
+
+      - name: Проверить, что наружу уходит только шифр
+        run: npm run check --prefix source/deploy
+
+      - name: Собрать сайт (только зашифрованный файл)
+        env:
+          STATICRYPT_PASSWORD: ${{ secrets.STATICRYPT_PASSWORD }}
+        run: |
+          mkdir -p out/podotchet
+          cp source/site/index.html out/podotchet/index.html
+          # тот же «отпечаток», что и при проверке, — чтобы следующая проверка знала, что эта версия уже на сайте
+          { printf '%s' "$STATICRYPT_PASSWORD"; cat source/index.html source/deploy/password_template.html source/deploy/staticrypt.json source/deploy/package-lock.json; } | sha256sum | cut -d' ' -f1 | tr -d '\n' > out/podotchet/version.txt
+          ls -la out/podotchet
+
+      - name: Упаковать сайт
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: out
+
+      - name: Выложить на сайт
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
