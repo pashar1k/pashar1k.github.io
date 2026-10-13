@@ -69,19 +69,12 @@ jobs:
             echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
 
-  # Шифрование и выкладка (только если есть что публиковать)
-  publish:
+  # Шифрование и упаковка сайта (только если есть что публиковать)
+  build:
     needs: check
     if: needs.check.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: https://pashar1k.github.io/podotchet/
     steps:
       - name: Забрать рабочую версию из закрытого проекта
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -122,5 +115,17 @@ jobs:
         with:
           path: out
 
+  # Выкладка упакованного сайта — отдельным шагом, как в официальной схеме GitHub
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: https://pashar1k.github.io/podotchet/
+    steps:
       - name: Выложить на сайт
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
